@@ -1,7 +1,9 @@
 """Командный интерфейс. Запуск: python shell.py [каталог]."""
 import argparse
 from pathlib import Path
-from fileops import FileError, directory, list_directory, select_files, copy_files
+from fileops import (
+    FileError, copy_files, list_directory, resolve_directory, select_file_names,
+)
 
 
 HELP = '''Команды:
@@ -25,66 +27,94 @@ HELP = '''Команды:
   copy отчёт_?.docx "D:\\Архив"'''
 
 
-def tokenize(line):
+COMMAND_ARGUMENT_COUNTS = {
+    'dir': (0, 1),
+    'cd': (0, 1),
+    'copy': (2, 2),
+    'help': (0, 1),
+    'exit': (0, 0),
+}
+
+
+def tokenize(line: str) -> list[str]:
     """Кавычки группируют пробелы, обратные слеши остаются буквальными."""
-    words, buffer, quoted, started = [], [], False, False
-    for char in line:
-        if char == '"':
-            quoted = not quoted
-            started = True
-        elif char.isspace() and not quoted:
-            if started:
-                words.append(''.join(buffer))
-                buffer, started = [], False
+    arguments = []
+    current_argument = []
+    inside_quotes = False
+    argument_started = False
+    for character in line:
+        if character == '"':
+            inside_quotes = not inside_quotes
+            argument_started = True
+        elif character.isspace() and not inside_quotes:
+            if argument_started:
+                arguments.append(''.join(current_argument))
+                current_argument = []
+                argument_started = False
         else:
-            buffer.append(char)
-            started = True
-    if quoted:
+            current_argument.append(character)
+            argument_started = True
+    if inside_quotes:
         raise FileError('Не закрыта двойная кавычка.')
-    if started:
-        words.append(''.join(buffer))
-    return words
+    if argument_started:
+        arguments.append(''.join(current_argument))
+    return arguments
 
 
 class Shell:
-    def __init__(self, path='.'):
-        self.cwd = directory(Path.cwd(), path)
+    """Хранит текущий каталог и выполняет команды лабораторного языка."""
 
-    def execute(self, line):
-        words = tokenize(line)
-        if not words:
+    def __init__(self, initial_directory: str = '.'):
+        self.current_directory = resolve_directory(Path.cwd(), initial_directory)
+
+    def execute(self, line: str) -> bool:
+        """Выполняет строку; False означает команду завершения работы."""
+        arguments = tokenize(line)
+        if not arguments:
             return True
-        command, *args = words
+        command, *parameters = arguments
         command = command.lower()
-        limits = {'dir': (0, 1), 'cd': (0, 1), 'copy': (2, 2), 'help': (0, 1), 'exit': (0, 0)}
-        if command not in limits:
+        if command not in COMMAND_ARGUMENT_COUNTS:
             raise FileError(f'Неизвестная команда: {command}. Введите help.')
-        low, high = limits[command]
-        if not low <= len(args) <= high:
+        minimum_count, maximum_count = COMMAND_ARGUMENT_COUNTS[command]
+        if not minimum_count <= len(parameters) <= maximum_count:
             raise FileError(f'Неверное число параметров: {command}. Введите help {command}.')
         if command == 'exit':
             return False
-        if command == 'help':
-            if args and args[0].lower() not in limits:
-                raise FileError(f'Неизвестная команда: {args[0]}')
-            print(HELP)
-        elif command == 'cd':
-            if args:
-                self.cwd = directory(self.cwd, args[0])
-            print(self.cwd)
-        elif command == 'dir':
-            entries = list_directory(self.cwd, args[0] if args else '*')
-            for entry in entries:
-                size = '<КАТАЛОГ>' if entry.is_dir else f'{entry.size:,} Б'
-                print(f'{entry.date}  {size:>15}  {entry.name}')
-            print(f'Каталогов: {sum(e.is_dir for e in entries)}; файлов: {sum(not e.is_dir for e in entries)}')
-        elif command == 'copy':
-            names = select_files(self.cwd, args[0])
-            paths = copy_files(self.cwd, names, args[1])
-            for path in paths:
-                print(f'{path.name} → {path.parent}')
-            print(f'Скопировано файлов: {len(paths)}')
+        handlers = {
+            'help': self.show_help,
+            'cd': self.change_directory,
+            'dir': self.show_directory,
+            'copy': self.copy_to_directory,
+        }
+        handlers[command](*parameters)
         return True
+
+    def show_help(self, command: str | None = None) -> None:
+        if command and command.lower() not in COMMAND_ARGUMENT_COUNTS:
+            raise FileError(f'Неизвестная команда: {command}')
+        print(HELP)
+
+    def change_directory(self, path: str | None = None) -> None:
+        if path is not None:
+            self.current_directory = resolve_directory(self.current_directory, path)
+        print(self.current_directory)
+
+    def show_directory(self, mask: str = '*') -> None:
+        entries = list_directory(self.current_directory, mask)
+        for entry in entries:
+            size_text = '<КАТАЛОГ>' if entry.is_dir else f'{entry.size:,} Б'
+            print(f'{entry.formatted_modified_time}  {size_text:>15}  {entry.name}')
+        directory_count = sum(entry.is_dir for entry in entries)
+        file_count = len(entries) - directory_count
+        print(f'Каталогов: {directory_count}; файлов: {file_count}')
+
+    def copy_to_directory(self, mask: str, destination_directory: str) -> None:
+        file_names = select_file_names(self.current_directory, mask)
+        copied_paths = copy_files(self.current_directory, file_names, destination_directory)
+        for copied_path in copied_paths:
+            print(f'{copied_path.name} → {copied_path.parent}')
+        print(f'Скопировано файлов: {len(copied_paths)}')
 
 
 def main():
@@ -98,7 +128,7 @@ def main():
     print('HMI — копирование в указанный каталог. Справка: help')
     while True:
         try:
-            if not shell.execute(input(f'{shell.cwd}> ')):
+            if not shell.execute(input(f'{shell.current_directory}> ')):
                 break
         except (EOFError, KeyboardInterrupt):
             print('\nВыход.')

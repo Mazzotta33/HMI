@@ -5,64 +5,79 @@ import queue
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
-from fileops import FileError, directory, list_directory, matches, plan_copy, copy_files
-from shell import HELP
+from fileops import FileError, resolve_directory, list_directory, matches_mask, build_copy_plan, copy_files
 
 
 class App(tk.Tk):
-    def __init__(self, path='.'):
+    """Окно файлового менеджера; операции с файлами выполняет fileops."""
+
+    def __init__(self, initial_directory: str = '.'):
         super().__init__()
         self.title('HMI — Копирование в указанный каталог')
         self.geometry('980x640')
         self.minsize(720, 460)
-        self.cwd = directory(Path.cwd(), path)
-        self.busy = False
-        self.events = queue.Queue()
-        self.path_var = tk.StringVar()
-        self.filter_var = tk.StringVar(value='*')
-        self.status = tk.StringVar()
-        self.sort_key, self.reverse = 'name', False
+        self.current_directory = resolve_directory(Path.cwd(), initial_directory)
+        self.copy_in_progress = False
+        self.copy_events = queue.Queue()
+        self.directory_text = tk.StringVar()
+        self.filter_mask = tk.StringVar(value='*')
+        self.status_text = tk.StringVar()
+        self.sort_column = 'name'
+        self.sort_descending = False
+        self.entries_by_name = {}
         self.build_menu()
+        self.build_toolbar()
+        self.build_action_panel()
+        self.build_file_list()
+        self.bind_keyboard_shortcuts()
+        ttk.Label(self, textvariable=self.status_text, padding=10, anchor='w').pack(fill='x')
+        self.protocol('WM_DELETE_WINDOW', self.close)
+        self.refresh()
+
+    def build_toolbar(self) -> None:
         toolbar = ttk.Frame(self, padding=10)
         toolbar.pack(fill='x')
         ttk.Button(toolbar, text='↑ На уровень выше', command=self.up).pack(side='left')
         ttk.Label(toolbar, text='  Каталог: ').pack(side='left')
-        address = ttk.Entry(toolbar, textvariable=self.path_var)
+        address = ttk.Entry(toolbar, textvariable=self.directory_text)
         address.pack(side='left', fill='x', expand=True, padx=6)
-        address.bind('<Return>', lambda e: self.navigate(self.path_var.get()))
+        address.bind('<Return>', lambda e: self.navigate(self.directory_text.get()))
         ttk.Button(toolbar, text='Открыть…', command=self.choose_directory).pack(side='left')
+
+    def build_action_panel(self) -> None:
         actions = ttk.Frame(self, padding=(10, 0, 10, 10))
         actions.pack(fill='x')
         self.copy_button = ttk.Button(actions, text='Копировать в…', command=self.copy_dialog)
         self.copy_button.pack(side='left')
         ttk.Button(actions, text='Выделить по маске…', command=self.select_mask).pack(side='left', padx=8)
         ttk.Label(actions, text='Показать:').pack(side='left', padx=(16, 4))
-        mask_entry = ttk.Entry(actions, textvariable=self.filter_var, width=18)
+        mask_entry = ttk.Entry(actions, textvariable=self.filter_mask, width=18)
         mask_entry.pack(side='left')
         mask_entry.bind('<Return>', lambda e: self.refresh())
         ttk.Button(actions, text='Применить', command=self.refresh).pack(side='left', padx=6)
+
+    def build_file_list(self) -> None:
         frame = ttk.Frame(self, padding=(10, 0))
         frame.pack(fill='both', expand=True)
-        self.tree = ttk.Treeview(frame, columns=('name', 'size', 'date'), show='headings', selectmode='extended')
+        self.file_list = ttk.Treeview(frame, columns=('name', 'size', 'date'), show='headings', selectmode='extended')
         for key, title, width in [('name', 'Имя', 450), ('size', 'Размер, байт', 130), ('date', 'Изменён', 170)]:
-            self.tree.heading(key, text=title, command=lambda k=key: self.sort(k))
-            self.tree.column(key, width=width, anchor='e' if key == 'size' else 'w')
-        self.tree.pack(side='left', fill='both', expand=True)
-        scroll = ttk.Scrollbar(frame, orient='vertical', command=self.tree.yview)
+            self.file_list.heading(key, text=title, command=lambda k=key: self.sort(k))
+            self.file_list.column(key, width=width, anchor='e' if key == 'size' else 'w')
+        self.file_list.pack(side='left', fill='both', expand=True)
+        scroll = ttk.Scrollbar(frame, orient='vertical', command=self.file_list.yview)
         scroll.pack(side='right', fill='y')
-        self.tree.configure(yscrollcommand=scroll.set)
-        self.tree.bind('<<TreeviewSelect>>', lambda e: self.selection_changed())
-        self.tree.bind('<Double-1>', self.activate)
-        self.tree.bind('<Return>', self.activate)
-        self.tree.bind('<BackSpace>', lambda e: self.up())
-        self.tree.bind('<Button-3>', self.context_menu)
-        self.tree.bind('<Control-a>', lambda e: self.select_all())
+        self.file_list.configure(yscrollcommand=scroll.set)
+        self.file_list.bind('<<TreeviewSelect>>', lambda e: self.selection_changed())
+        self.file_list.bind('<Double-1>', self.activate)
+        self.file_list.bind('<Return>', self.activate)
+        self.file_list.bind('<BackSpace>', lambda e: self.up())
+        self.file_list.bind('<Button-3>', self.context_menu)
+        self.file_list.bind('<Control-a>', lambda e: self.select_all())
+
+    def bind_keyboard_shortcuts(self) -> None:
         self.bind('<F5>', lambda e: self.refresh())
         self.bind('<F1>', lambda e: self.show_help())
         self.bind('<Control-Shift-C>', lambda e: self.copy_dialog())
-        ttk.Label(self, textvariable=self.status, padding=10, anchor='w').pack(fill='x')
-        self.protocol('WM_DELETE_WINDOW', self.close)
-        self.refresh()
 
     def build_menu(self):
         bar = tk.Menu(self)
@@ -72,19 +87,19 @@ class App(tk.Tk):
         file_menu.add_separator()
         file_menu.add_command(label='Выход', command=self.close)
         bar.add_cascade(label='Файл', menu=file_menu)
-        self.edit = tk.Menu(bar, tearoff=False)
-        self.edit.add_command(label='Копировать в…', command=self.copy_dialog)
-        self.edit.add_separator()
-        self.edit.add_command(label='Выделить все файлы', command=self.select_all)
-        self.edit.add_command(label='Выделить по маске…', command=self.select_mask)
-        self.edit.add_command(label='Снять выделение', command=lambda: self.tree.selection_remove(self.tree.selection()))
-        bar.add_cascade(label='Правка', menu=self.edit)
+        self.edit_menu = tk.Menu(bar, tearoff=False)
+        self.edit_menu.add_command(label='Копировать в…', command=self.copy_dialog)
+        self.edit_menu.add_separator()
+        self.edit_menu.add_command(label='Выделить все файлы', command=self.select_all)
+        self.edit_menu.add_command(label='Выделить по маске…', command=self.select_mask)
+        self.edit_menu.add_command(label='Снять выделение', command=lambda: self.file_list.selection_remove(self.file_list.selection()))
+        bar.add_cascade(label='Правка', menu=self.edit_menu)
         view = tk.Menu(bar, tearoff=False)
         view.add_command(label='Обновить', accelerator='F5', command=self.refresh)
         sorting = tk.Menu(view, tearoff=False)
-        self.sort_var = tk.StringVar(value='name')
+        self.sort_column_choice = tk.StringVar(value='name')
         for key, label in [('name', 'По имени'), ('size', 'По размеру'), ('date', 'По времени изменения')]:
-            sorting.add_radiobutton(label=label, variable=self.sort_var, value=key,
+            sorting.add_radiobutton(label=label, variable=self.sort_column_choice, value=key,
                                     command=lambda k=key: self.sort(k))
         view.add_cascade(label='Сортировка', menu=sorting)
         bar.add_cascade(label='Вид', menu=view)
@@ -94,150 +109,187 @@ class App(tk.Tk):
             'О программе', 'HMI\nЛабораторная работа № 2\nКомандный язык и меню\nВариант: копирование в указанный каталог.'))
         bar.add_cascade(label='Справка', menu=help_menu)
         self.configure(menu=bar)
-        self.popup = tk.Menu(self, tearoff=False)
-        self.popup.add_command(label='Копировать в…', command=self.copy_dialog)
-        self.popup.add_command(label='Выделить все файлы', command=self.select_all)
-        self.popup.add_command(label='Обновить', command=self.refresh)
+        self.context_popup = tk.Menu(self, tearoff=False)
+        self.context_popup.add_command(label='Копировать в…', command=self.copy_dialog)
+        self.context_popup.add_command(label='Выделить все файлы', command=self.select_all)
+        self.context_popup.add_command(label='Обновить', command=self.refresh)
 
     def navigate(self, value):
-        if self.busy:
+        if self.copy_in_progress:
             return
         try:
-            new = directory(self.cwd, value)
-            list_directory(new)
-            self.cwd = new
+            new_directory = resolve_directory(self.current_directory, value)
+            list_directory(new_directory)
+            self.current_directory = new_directory
             self.refresh()
         except FileError as exc:
-            self.path_var.set(str(self.cwd))
+            self.directory_text.set(str(self.current_directory))
             messagebox.showerror('Переход невозможен', str(exc))
 
     def choose_directory(self):
-        if not self.busy:
-            path = filedialog.askdirectory(initialdir=self.cwd, title='Открыть каталог', mustexist=True)
+        if not self.copy_in_progress:
+            path = filedialog.askdirectory(initialdir=self.current_directory, title='Открыть каталог', mustexist=True)
             if path:
                 self.navigate(path)
 
     def up(self):
-        self.navigate(str(self.cwd.parent))
+        self.navigate(str(self.current_directory.parent))
 
     def refresh(self):
-        if self.busy:
+        if self.copy_in_progress:
             return
         try:
-            entries = list_directory(self.cwd, self.filter_var.get() or '*')
+            entries = list_directory(self.current_directory, self.filter_mask.get() or '*')
         except FileError as exc:
             messagebox.showerror('Ошибка чтения', str(exc))
             return
-        self.entries = {e.name: e for e in entries}
-        key = {'name': lambda e: e.name.casefold(), 'size': lambda e: e.size,
-               'date': lambda e: e.modified}[self.sort_key]
-        entries.sort(key=key, reverse=self.reverse)
-        entries.sort(key=lambda e: not e.is_dir)
-        self.tree.delete(*self.tree.get_children())
-        if self.cwd.parent != self.cwd:
-            self.tree.insert('', 'end', iid='..', values=('..', '<КАТАЛОГ>', ''))
+        self.entries_by_name = {entry.name: entry for entry in entries}
+        sort_keys = {
+            'name': lambda entry: entry.name.casefold(),
+            'size': lambda entry: entry.size,
+            'date': lambda entry: entry.modified,
+        }
+        entries.sort(key=sort_keys[self.sort_column], reverse=self.sort_descending)
+        entries.sort(key=lambda entry: not entry.is_dir)
+        self.file_list.delete(*self.file_list.get_children())
+        if self.current_directory.parent != self.current_directory:
+            self.file_list.insert('', 'end', iid='..', values=('..', '<КАТАЛОГ>', ''))
         for entry in entries:
-            self.tree.insert('', 'end', iid=entry.name,
-                             values=(entry.name, '<КАТАЛОГ>' if entry.is_dir else f'{entry.size:,}', entry.date))
-        self.path_var.set(str(self.cwd))
+            self.file_list.insert('', 'end', iid=entry.name,
+                             values=(entry.name, '<КАТАЛОГ>' if entry.is_dir else f'{entry.size:,}', entry.formatted_modified_time))
+        self.directory_text.set(str(self.current_directory))
         self.selection_changed()
 
     def sort(self, key):
-        self.reverse = not self.reverse if self.sort_key == key else False
-        self.sort_key = key
-        self.sort_var.set(key)
+        if self.copy_in_progress:
+            # Пункт-переключатель меню мог изменить StringVar до вызова обработчика.
+            self.sort_column_choice.set(self.sort_column)
+            return
+        self.sort_descending = not self.sort_descending if self.sort_column == key else False
+        self.sort_column = key
+        self.sort_column_choice.set(key)
         self.refresh()
 
     def selected_files(self):
-        return [n for n in self.tree.selection() if n in self.entries and not self.entries[n].is_dir]
+        return [name for name in self.file_list.selection()
+                if name in self.entries_by_name and not self.entries_by_name[name].is_dir]
 
     def selection_changed(self):
         count = len(self.selected_files())
-        state = 'normal' if count and not self.busy else 'disabled'
+        state = 'normal' if count and not self.copy_in_progress else 'disabled'
         self.copy_button.configure(state=state)
-        self.edit.entryconfigure(0, state=state)
-        self.popup.entryconfigure(0, state=state)
-        if not self.busy:
-            self.status.set(f'Объектов: {len(self.entries)}   |   Выбрано файлов: {count}')
+        self.edit_menu.entryconfigure(0, state=state)
+        self.context_popup.entryconfigure(0, state=state)
+        if not self.copy_in_progress:
+            self.status_text.set(f'Объектов: {len(self.entries_by_name)}   |   Выбрано файлов: {count}')
 
     def select_all(self):
-        if not self.busy:
-            self.tree.selection_set([n for n, e in self.entries.items() if not e.is_dir])
+        if not self.copy_in_progress:
+            file_names = [name for name, entry in self.entries_by_name.items() if not entry.is_dir]
+            self.file_list.selection_set(file_names)
         return 'break'
 
     def select_mask(self):
-        if self.busy:
+        if self.copy_in_progress:
             return
         mask = simpledialog.askstring('Выделение по маске', 'Маска (* — любые символы, ? — один):', initialvalue='*.txt', parent=self)
         if mask:
-            names = [n for n, e in self.entries.items() if not e.is_dir and matches(n, mask)]
-            self.tree.selection_set(names)
-            if not names:
+            file_names = [name for name, entry in self.entries_by_name.items()
+                          if not entry.is_dir and matches_mask(name, mask)]
+            self.file_list.selection_set(file_names)
+            if not file_names:
                 messagebox.showinfo('Выделение', 'Среди отображаемых файлов совпадений нет.')
 
     def activate(self, event=None):
-        if self.busy:
+        if self.copy_in_progress:
             return
-        name = self.tree.focus()
+        name = self.file_list.focus()
         if name == '..':
             self.up()
-        elif name in self.entries and self.entries[name].is_dir:
+        elif name in self.entries_by_name and self.entries_by_name[name].is_dir:
             self.navigate(name)
         elif name:
             self.copy_dialog()
 
     def context_menu(self, event):
-        item = self.tree.identify_row(event.y)
-        if item and item not in self.tree.selection():
-            self.tree.selection_set(item)
+        item = self.file_list.identify_row(event.y)
+        if item and item not in self.file_list.selection():
+            self.file_list.selection_set(item)
         self.selection_changed()
-        self.popup.tk_popup(event.x_root, event.y_root)
+        try:
+            self.context_popup.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.context_popup.grab_release()
 
     def copy_dialog(self):
-        if self.busy:
+        if self.copy_in_progress:
             return
-        names = self.selected_files()
-        if not names:
+        file_names = self.selected_files()
+        if not file_names:
             return
-        target = filedialog.askdirectory(title='Копировать в указанный каталог', initialdir=self.cwd, mustexist=True)
-        if not target:
+        destination_directory = filedialog.askdirectory(
+            title='Копировать в указанный каталог',
+            initialdir=self.current_directory, mustexist=True,
+        )
+        if not destination_directory:
             return
         try:
-            plan_copy(self.cwd, names, target)
+            build_copy_plan(self.current_directory, file_names, destination_directory)
         except (FileError, OSError) as exc:
             messagebox.showerror('Копирование невозможно', str(exc))
             return
-        preview = '\n'.join(names[:12])
-        if len(names) > 12:
-            preview += f'\n… и ещё {len(names) - 12}'
-        if not messagebox.askokcancel('Копирование файлов',
-                f'Файлов: {len(names)}\n\n{preview}\n\nИз: {self.cwd}\nВ: {target}\n\nСуществующие файлы не заменяются.'):
+        if not self.confirm_copy(file_names, destination_directory):
             return
-        self.busy = True
+        self.start_copy(file_names, destination_directory)
+
+    def confirm_copy(self, file_names: list[str], destination_directory: str) -> bool:
+        preview = '\n'.join(file_names[:12])
+        if len(file_names) > 12:
+            preview += f'\n… и ещё {len(file_names) - 12}'
+        return messagebox.askokcancel(
+            'Копирование файлов',
+            f'Файлов: {len(file_names)}\n\n{preview}\n\n'
+            f'Из: {self.current_directory}\nВ: {destination_directory}\n\n'
+            'Существующие файлы не заменяются.',
+        )
+
+    def start_copy(self, file_names: list[str], destination_directory: str) -> None:
+        self.copy_in_progress = True
         self.selection_changed()
-        self.status.set('Копирование…')
-        source = self.cwd
-
-        def worker():
-            try:
-                result = copy_files(source, names, target,
-                                    lambda done, total, name: self.events.put(('progress', f'{done}/{total}: {name}')))
-                self.events.put(('done', f'Скопировано файлов: {len(result)}. Каталог: {target}'))
-            except (FileError, OSError) as exc:
-                self.events.put(('error', str(exc)))
-
-        threading.Thread(target=worker, daemon=True).start()
+        self.status_text.set('Копирование…')
+        threading.Thread(
+            target=self.run_copy_in_background,
+            args=(self.current_directory, file_names, destination_directory),
+            daemon=True,
+        ).start()
         self.after(80, self.poll_copy)
+
+    def run_copy_in_background(
+        self, source_directory: Path, file_names: list[str], destination_directory: str,
+    ) -> None:
+        """Рабочий поток передаёт события через очередь, не обращаясь к Tkinter."""
+        try:
+            copied_paths = copy_files(
+                source_directory, file_names, destination_directory,
+                on_progress=self.report_copy_progress,
+            )
+            message = f'Скопировано файлов: {len(copied_paths)}. Каталог: {destination_directory}'
+            self.copy_events.put(('done', message))
+        except (FileError, OSError) as exc:
+            self.copy_events.put(('error', str(exc)))
+
+    def report_copy_progress(self, completed_count: int, total_count: int, file_name: str) -> None:
+        self.copy_events.put(('progress', f'{completed_count}/{total_count}: {file_name}'))
 
     def poll_copy(self):
         try:
             while True:
-                kind, text = self.events.get_nowait()
-                self.status.set(text)
+                kind, text = self.copy_events.get_nowait()
+                self.status_text.set(text)
                 if kind in ('done', 'error'):
-                    self.busy = False
+                    self.copy_in_progress = False
                     self.selection_changed()
-                    self.status.set(text)
+                    self.status_text.set(text)
                     if kind == 'error':
                         messagebox.showerror('Ошибка копирования', text)
                     else:
@@ -256,10 +308,10 @@ class App(tk.Tk):
             'Двойной щелчок по файлу также открывает копирование.\n'
             'Фильтр ограничивает список и выделение. Сортировка — по заголовкам столбцов.\n'
             'Подкаталоги и символические ссылки не копируются.\n'
-            'Во время копирования дождитесь результата, затем можно закрыть окно.\n\n' + HELP)
+            'Во время копирования дождитесь результата, затем можно закрыть окно.')
 
     def close(self):
-        if self.busy:
+        if self.copy_in_progress:
             messagebox.showinfo('Копирование', 'Дождитесь завершения копирования файлов.')
         else:
             self.destroy()
