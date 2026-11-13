@@ -130,6 +130,36 @@ class FileTests(unittest.TestCase):
             with self.subTest(command=command), self.assertRaises(FileError):
                 shell.execute(command)
 
+    def test_shell_help_for_each_command(self):
+        shell = Shell(str(self.source_directory))
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertTrue(shell.execute('help'))
+        self.assertTrue(output.getvalue().startswith('Команды:'))
+        for command, syntax in (
+            ('dir', 'dir [маска]'),
+            ('cd', 'cd [путь]'),
+            ('copy', 'copy <имя|маска> <каталог>'),
+            ('help', 'help [команда]'),
+            ('exit', 'exit'),
+        ):
+            with self.subTest(command=command):
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertTrue(shell.execute(f'HELP {command.upper()}'))
+                text = output.getvalue()
+                self.assertEqual(text.splitlines()[0], syntax)
+                self.assertIn('Пример', text)
+                self.assertNotIn('Команды:', text)
+        self.assertEqual(shell.current_directory, self.source_directory.resolve())
+
+    def test_shell_help_rejects_unknown_or_empty_command(self):
+        shell = Shell(str(self.source_directory))
+        for command in ('help unknown', 'help ""'):
+            with self.subTest(command=command):
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    with self.assertRaisesRegex(FileError, 'Неизвестная команда:'):
+                        shell.execute(command)
+                self.assertEqual(output.getvalue(), '')
+
 
 class LanguageTests(unittest.TestCase):
     def test_windows_paths_and_spaces(self):
