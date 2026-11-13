@@ -1,4 +1,6 @@
 """Общие операции для командного языка и интерфейса с меню."""
+from __future__ import annotations
+
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path

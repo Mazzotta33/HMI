@@ -1,9 +1,16 @@
 """Командный интерфейс. Запуск: python shell.py [каталог]."""
+from __future__ import annotations
+
 import argparse
 from pathlib import Path
 from fileops import (
     FileError, copy_files, list_directory, resolve_directory, select_file_names,
 )
+
+try:
+    import readline  # Редактирование строки и история команд в input() на macOS/Linux.
+except ImportError:
+    pass  # На Windows используется редактирование строки средствами консоли.
 
 
 HELP = '''Команды:
